@@ -4,7 +4,7 @@ import requests
 import os
 import random
 
-API_KEY = 'AIzaSyBJnACLUXMKDxC6hb-ufer3JokopWwxpfk'
+API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 streetview_url = "https://maps.googleapis.com/maps/api/streetview"
 metadata_url   = "https://maps.googleapis.com/maps/api/streetview/metadata"
 

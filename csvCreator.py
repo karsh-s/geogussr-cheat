@@ -1,0 +1,60 @@
+import os
+import pandas as pd
+
+# List of European countries (you can modify this list based on your actual folders)
+european_countries = [
+    "Albania","Andorra","Austria","Belgium","Bulgaria","Croatia",
+    "Czech Republic","Denmark","Estonia","Finland","France",
+    "Germany","Greece","Hungary","Iceland","Ireland","Italy",
+    "Latvia","Liechtenstein","Lithuania","Luxembourg","Malta",
+    "Monaco","Montenegro","Netherlands","North Macedonia",
+    "Norway","Poland","Portugal","Romania","Serbia",
+    "Slovakia","Slovenia","Spain","Sweden","Switzerland",
+    "United Kingdom"
+]
+
+# Base directory where your script is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+image_dir = os.path.join(BASE_DIR, "trainEurope")
+
+# Generate the CSV data
+data = []
+
+for country in european_countries:
+    country_path = os.path.join(image_dir, country)
+    
+    # Check if the country folder exists
+    if os.path.exists(country_path):
+        for i in range(1000):  # img_0 to img_999
+            image_filename = f"img_{i}.jpg"  # Adjust extension if needed (.png, .jpeg, etc.)
+            image_path = os.path.join(country, image_filename)
+            
+            # Check if the image file exists
+            full_path = os.path.join(country_path, image_filename)
+            if os.path.exists(full_path):
+                # Convert country name from folder format to readable caption
+                caption = country.replace('_', ' ')
+                data.append({
+                    'file': f"/{image_path}",  # Path relative to image_dir
+                    'caption': caption,  # Human-readable country name
+                    'country': country,  # Original folder name
+                    'image_id': i
+                })
+            else:
+                print(f"Warning: {full_path} not found")
+    else:
+        print(f"Warning: Country folder {country_path} not found")
+
+# Create DataFrame
+df = pd.DataFrame(data)
+
+# Save to CSV with semicolon separator
+output_path = os.path.join(image_dir, 'inputs.csv')
+df.to_csv(output_path, sep=';', index=False)
+
+print(f"CSV file created successfully at: {output_path}")
+print(f"Total images: {len(df)}")
+print(f"\nFirst few rows:")
+print(df.head(10))
+print(f"\nCountry distribution:")
+print(df['country'].value_counts())

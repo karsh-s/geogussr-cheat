@@ -405,7 +405,7 @@ def prefetch(manifest, per_country=None, workers=16, label=''):
     print(f'{label}: {done:,}/{len(tasks):,} images in local cache')
 
 # %%
-if COLLECT_MODE and MLY_TOKEN != 'YOUR_MAPILLARY_CLIENT_TOKEN_HERE':
+if COLLECT_MODE and MLY_TOKEN.startswith('MLY|'):
     # Phase A: URL floor for every country (search only — takes minutes)
     MIN_FLOOR = 1500
     print(f'Bootstrapping manifests: {MIN_FLOOR} train / '

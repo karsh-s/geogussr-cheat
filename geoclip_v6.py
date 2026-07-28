@@ -31,7 +31,7 @@
 # ## 1 · Setup
 
 # %%
-!pip -q install open_clip_torch albumentations mapbox_vector_tile
+!pip -q install open_clip_torch albumentations mapbox_vector_tile ultralytics
 
 # %%
 import os, json, math, time, random, shutil, threading
@@ -670,7 +670,6 @@ GIVEAWAY_MAP   = f'{DRIVE_ROOT}/models/giveaway_v1/class_to_idx.json'
 fusion_ready   = os.path.exists(GIVEAWAY_MODEL) and os.path.exists(GIVEAWAY_MAP)
 
 if fusion_ready:
-    !pip -q install ultralytics
     from ultralytics import YOLOWorld
     from torchvision import models as tv_models
 

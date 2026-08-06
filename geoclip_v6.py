@@ -415,28 +415,29 @@ def clean_manifest(manifest, model, label=''):
         print(f'{label}: nothing new to clean.')
         return
     model.eval()
-    B = 256                      # bigger GPU batch
-    FETCH_WORKERS = 32           # parallel downloads — this is the bottleneck
+    B = 512                       # GPU batch
+    FETCH_WORKERS = 128           # parallel downloads — the real bottleneck
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS)
 
     def _load(args):
         iid, url, c = args
         p = fetch_image(iid, url, manifest, c)
         if p is None:
-            return iid, None
+            return iid, None, 'fetch_fail'   # network issue — do NOT blacklist
         try:
-            return iid, clip_preprocess(Image.open(p).convert('RGB'))
+            return iid, clip_preprocess(Image.open(p).convert('RGB')), 'ok'
         except Exception:
-            return iid, None
+            return iid, None, 'corrupt'
 
     for k in tqdm(range(0, len(todo), B), desc=f'clean {label}'):
         batch, metas = [], []
-        for iid, tensor in pool.map(_load, todo[k:k + B]):
-            if tensor is None:
+        for iid, tensor, status in pool.map(_load, todo[k:k + B]):
+            if status == 'corrupt':
                 clean_index[iid] = 0
-            else:
+            elif status == 'ok':
                 batch.append(tensor)
                 metas.append(iid)
+            # fetch_fail: leave unjudged so a later run retries it
         if not batch:
             continue
         with torch.no_grad(), torch.autocast('cuda'):
@@ -447,7 +448,7 @@ def clean_manifest(manifest, model, label=''):
         junk = sims[:, n_g:].max(1).values
         for iid, g, j in zip(metas, good.tolist(), junk.tolist()):
             clean_index[iid] = int(j - g < JUNK_MARGIN)
-        if k % (B * 20) == 0:
+        if k % (B * 10) == 0:
             save_json(clean_index, CLEAN_INDEX)
     pool.shutdown(wait=False)
     save_json(clean_index, CLEAN_INDEX)

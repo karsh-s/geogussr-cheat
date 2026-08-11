@@ -429,6 +429,34 @@ train_ds = GeoDataset(train_samples, train_tf)
 val_ds   = GeoDataset(val_samples, val_tf)
 print(f'after cleaning — train {len(train_ds):,} | val {len(val_ds):,}')
 
+
+def prefetch(samples, workers=128, label=''):
+    """Warm the local image cache in parallel.
+
+    Essential, not optional: the DataLoader's few workers each download
+    serially (~6 img/s total), which turns epoch 1 into an 11-hour
+    download. 128 concurrent fetchers do the same work in ~1.5 hours,
+    and every later epoch then reads from local disk at full speed.
+    """
+    todo = [(iid, url) for iid, url, _ in samples
+            if not os.path.exists(os.path.join(IMG_CACHE, f'{iid}.jpg'))]
+    if not todo:
+        print(f'{label}: cache already warm.')
+        return
+    print(f'{label}: {len(todo):,} images to download')
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(fetch_image, iid, url) for iid, url in todo]
+        for f in tqdm(concurrent.futures.as_completed(futs),
+                      total=len(futs), desc=f'prefetch {label}'):
+            if f.result():
+                done += 1
+    print(f'{label}: {done:,}/{len(todo):,} now cached')
+
+
+prefetch(train_ds.samples, label='train')
+prefetch(val_ds.samples,   label='val')
+
 counts = {}
 for _, _, c in train_ds.samples:
     counts[c] = counts.get(c, 0) + 1

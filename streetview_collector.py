@@ -75,7 +75,10 @@ TILE_PX    = 512
 # ── Sampling behaviour ──────────────────────────────────────
 SEARCH_RADIUS_M = 2000        # how far from the random point to look
 MIN_SEP_M       = 150         # reject panos this close to one already kept
-OFFICIAL_ONLY   = True        # drop user-uploaded photospheres
+# User photospheres have long ids; official Google car panoramas use
+# 22-character ids, and the regex below only matches those — so this is
+# handled by the id format, not by a request flag. (An earlier attempt to
+# filter via the protobuf returned HTTP 400 on every call.)
 WORKERS         = 8
 MAX_TRIES_MULT  = 40          # give up on a country after this many misses
 SAVE_EVERY      = 25          # write the index to Drive this often
@@ -186,14 +189,12 @@ _LATLNG_RE = _re.compile(r'\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]')
 def find_pano(lat, lng, radius=SEARCH_RADIUS_M):
     """Nearest panorama to a coordinate. Returns (pano_id, lat, lng) or None.
 
-    `!1e2` in the request selects official Google car coverage; dropping
-    the photosphere flags keeps user-uploaded 360s out of the dataset.
+    Do not "optimise" the pb string without testing it — it is a
+    positional protobuf and small edits silently return HTTP 400.
     """
     pb = (f'!1m5!1sapiv3!5sUS!11m2!1m1!1b0!2m4!1m2!3d{lat}!4d{lng}'
           f'!2d{radius}!3m10!2m2!1sen!2sGB!9m1!1e2!11m4!1m3!1e2!2b1!3e2'
           '!4m10!1e1!1e2!1e3!1e4!1e8!1e6!5m1!1e2!6m1!1e2')
-    if OFFICIAL_ONLY:
-        pb = pb.replace('!4m10!1e1!1e2!1e3!1e4!1e8!1e6', '!4m6!1e1!1e8!1e6')
     try:
         r = requests.get(SEARCH_URL, params={'pb': pb, 'callback': 'cb'},
                          timeout=20)
@@ -289,6 +290,8 @@ def collect_country(country, target=TARGET_PER_COUNTRY):
     need_panos = math.ceil((target - have) / N_HEADINGS)
     added = tries = 0
     max_tries = need_panos * MAX_TRIES_MULT
+    dry_streak = 0        # consecutive misses; a country with no coverage
+                          # should be abandoned quickly, not ground over
     pbar = tqdm(total=need_panos, desc=f'{country[:20]:20s}', leave=False)
 
     def one():
@@ -321,7 +324,12 @@ def collect_country(country, target=TARGET_PER_COUNTRY):
                 tries += 1
                 res = fut.result()
                 if res is None:
+                    dry_streak += 1
+                    if dry_streak >= 400 and added == 0:
+                        print(f'  {country}: no usable panoramas found, skipping')
+                        pbar.close(); save_index(); return 0
                     continue
+                dry_streak = 0
                 pid, plat, plng, pano = res
                 if pid in kept:
                     continue
@@ -345,7 +353,19 @@ def collect_country(country, target=TARGET_PER_COUNTRY):
     return added * N_HEADINGS
 
 
-print(f'Target {TARGET_PER_COUNTRY:,} images/country '
+# Smoke test: if lookups are broken, say so in seconds rather than
+# silently returning zero for hours.
+_probe = [find_pano(48.8584, 2.2945), find_pano(52.5200, 13.4050),
+          find_pano(41.9028, 12.4964)]
+_ok = sum(p is not None for p in _probe)
+print(f'connectivity check: {_ok}/3 lookups returned a panorama')
+if _ok == 0:
+    raise SystemExit(
+        'Panorama lookup is returning nothing for known-covered cities.\n'
+        'The search endpoint or its request format has changed — collection\n'
+        'would run for hours and collect zero. Stop and fix find_pano().')
+
+print(f'\nTarget {TARGET_PER_COUNTRY:,} images/country '
       f'({TARGET_PER_COUNTRY // N_HEADINGS:,} panoramas)\n')
 for country in WANTED:
     n = collect_country(country)

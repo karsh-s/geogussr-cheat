@@ -135,14 +135,41 @@ print('train source:', TRAIN_SRC)
 print('test  source:', TEST_SRC)
 
 def _copy_local(src, dst):
-    """Copy off Drive — per-file Drive reads are ~100x slower than local."""
-    if src.startswith('/content/drive'):
-        if not os.path.isdir(dst) or not glob.glob(os.path.join(dst, '*', '*.jpg')):
-            print(f'copying {src} -> {dst} (one time) ...')
-            shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(src, dst)
+    """Get the images onto local disk — per-file Drive reads are ~100x
+    slower than local, and Colab wipes /content between sessions.
+
+    Fast path: a single .zip on Drive. Reading one big file off Drive is
+    far quicker than 33k small ones, so the first run builds the zip and
+    every later session unzips it in a couple of minutes.
+    """
+    if not src.startswith('/content/drive'):
+        return src
+    if os.path.isdir(dst) and glob.glob(os.path.join(dst, '*', '*.jpg')):
         return dst
-    return src
+
+    zip_path = src.rstrip('/') + '.zip'
+    if os.path.exists(zip_path):
+        print(f'unzipping {zip_path} -> {dst} ...')
+        os.makedirs(dst, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(dst)
+        inner = glob.glob(os.path.join(dst, '*'))
+        # tolerate zips that contain a single wrapping folder
+        if len(inner) == 1 and os.path.isdir(inner[0]) and \
+                not glob.glob(os.path.join(dst, '*', '*.jpg')):
+            for p in glob.glob(os.path.join(inner[0], '*')):
+                shutil.move(p, dst)
+        return dst
+
+    print(f'copying {src} -> {dst} (slow, one time) ...')
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+    try:
+        print(f'building {zip_path} so future sessions start fast ...')
+        shutil.make_archive(src.rstrip('/'), 'zip', dst)
+    except Exception as ex:
+        print('  (could not write zip, not fatal):', ex)
+    return dst
 
 TRAIN_DIR = _copy_local(TRAIN_SRC, LOCAL_TRAIN)
 TEST_DIR  = _copy_local(TEST_SRC, LOCAL_TEST)

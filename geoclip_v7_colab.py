@@ -34,6 +34,12 @@
 # cannot destroy CLIP's knowledge the way v6.1's full fine-tune did),
 # then an optional light fine-tune of the top ViT blocks. Whichever wins
 # on the held-out test panoramas is what gets saved.
+#
+# **Backbone: ViT-L/14.** The ViT-B/16 run scored 76.7% top-1 / 96.3%
+# top-5 per location, and its fine-tune beat its probe — evidence that
+# backbone capacity was still paying off, so this run tries the larger
+# model. Features are tagged by model name, so the B-16 cache is kept
+# and the two runs stay directly comparable.
 
 # %% [markdown]
 # ## 1 · Setup
@@ -139,8 +145,12 @@ def save_model(obj, name='best_model.pth'):
         print(f"       files.download('{local}')")
 
 
-CLIP_MODEL    = 'ViT-B-16'      # try 'ViT-L-14' for ~+5-10 pts, ~3x slower
-CLIP_PRETRAIN = 'laion2b_s34b_b88k'
+# ViT-L-14: 24 blocks, 768-dim features (B-16 was 12 blocks, 512-dim).
+# 'datacomp_xl_s13b_b90k' is a stronger checkpoint on general benchmarks
+# and worth trying as a one-line swap; laion2b keeps the same lineage as
+# the ViT-B-16 run so the comparison is clean.
+CLIP_MODEL    = 'ViT-L-14'
+CLIP_PRETRAIN = 'laion2b_s32b_b82k'
 IMG_SIZE      = 224
 
 # Splits — by PANORAMA, not by image
@@ -155,14 +165,15 @@ PROBE_WD     = 1e-3
 # Stage 2 — light fine-tune
 DO_FINETUNE  = True
 FT_EPOCHS    = 8
-FT_UNFREEZE  = 4          # top N of 12 ViT blocks
-FT_LR        = 1e-5
+FT_UNFREEZE  = 8          # top N blocks; ViT-L-14 has 24, so 8 is the
+                          # same fraction as 4 of B-16's 12
+FT_LR        = 8e-6       # slightly gentler - bigger model, same data
 FT_WD        = 0.1
-FT_BATCH     = 128
+FT_BATCH     = 64         # halved: ViT-L activations are ~3x B-16's
 EARLY_STOP   = 2
 
 LABEL_SMOOTH  = 0.1
-EXTRACT_BATCH = 256
+EXTRACT_BATCH = 128       # ViT-L needs more memory per image
 NUM_WORKERS   = 4
 IMG_EXT = ('.webp', '.jpg', '.jpeg', '.png')
 

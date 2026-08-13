@@ -42,7 +42,7 @@
 !pip -q install open_clip_torch
 
 # %%
-import os, json, glob, math, random, shutil, zipfile, re
+import os, json, glob, math, random, shutil, zipfile, re, time
 from collections import defaultdict
 
 import numpy as np
@@ -72,7 +72,14 @@ drive.mount('/content/drive')
 DRIVE_ROOT = '/content/drive/MyDrive/GeoGussrCheat'
 
 # Clean, polygon-verified data from streetview_collector.ipynb.
-SV_DIR     = f'{DRIVE_ROOT}/trainStreetView'
+# Several candidates because GeoGussrCheat may be a *shortcut* to a
+# shared folder, and Colab's Drive mount traverses shortcuts unreliably
+# (os.path.isdir can pass while os.scandir fails on the same path).
+SV_CANDIDATES = [
+    '/content/drive/MyDrive/trainStreetView',        # moved out of the share
+    f'{DRIVE_ROOT}/trainStreetView',                 # via the shortcut
+    '/content/sv_data',                              # already local
+]
 LOCAL_SV   = '/content/sv_data'
 
 # Set True only if you understand the labels are ~63% wrong; kept so the
@@ -80,10 +87,25 @@ LOCAL_SV   = '/content/sv_data'
 ALLOW_DIRTY_FALLBACK = False
 DIRTY_DIR  = f'{DRIVE_ROOT}/trainEurope'
 
-OUT_DIR   = f'{DRIVE_ROOT}/models/geoclip_v7'
-FEAT_DIR  = f'{DRIVE_ROOT}/features_v7'
-os.makedirs(OUT_DIR, exist_ok=True)
-os.makedirs(FEAT_DIR, exist_ok=True)
+def _writable(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        t = os.path.join(path, '.w')
+        open(t, 'w').close(); os.remove(t)
+        return True
+    except Exception:
+        return False
+
+OUT_DIR  = f'{DRIVE_ROOT}/models/geoclip_v7'
+FEAT_DIR = f'{DRIVE_ROOT}/features_v7'
+if not _writable(OUT_DIR):
+    OUT_DIR = '/content/drive/MyDrive/geoclip_v7'
+    print('!! Drive shortcut not writable — saving model to', OUT_DIR)
+    _writable(OUT_DIR)
+if not _writable(FEAT_DIR):
+    FEAT_DIR = '/content/features_v7'
+    print('!! caching features locally at', FEAT_DIR, '(lost on disconnect)')
+    _writable(FEAT_DIR)
 
 CLIP_MODEL    = 'ViT-B-16'      # try 'ViT-L-14' for ~+5-10 pts, ~3x slower
 CLIP_PRETRAIN = 'laion2b_s34b_b88k'
@@ -138,23 +160,62 @@ def _copy_local(src, dst):
             for p in glob.glob(os.path.join(inner[0], '*')):
                 shutil.move(p, dst)
         return dst
-    print(f'copying {src} -> {dst} (slow, one time) ...')
-    shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst)
+    # Copy country by country with retries and resume. One giant
+    # copytree over ~185k Drive files fails if the mount hiccups even
+    # once, and throws away everything already copied.
+    print(f'copying {src} -> {dst} (one time; Drive is slow for many files)')
+    os.makedirs(dst, exist_ok=True)
+    countries = sorted(os.listdir(src))
+    for c in tqdm(countries, desc='copy'):
+        s_dir, d_dir = os.path.join(src, c), os.path.join(dst, c)
+        if not os.path.isdir(s_dir):
+            continue
+        for attempt in range(3):
+            try:
+                have = len(os.listdir(d_dir)) if os.path.isdir(d_dir) else 0
+                want = len(os.listdir(s_dir))
+                if have >= want:
+                    break                      # already copied
+                shutil.copytree(s_dir, d_dir, dirs_exist_ok=True)
+                break
+            except Exception as ex:
+                if attempt == 2:
+                    print(f'  {c}: giving up after 3 tries ({ex})')
+                else:
+                    time.sleep(3)
     try:
-        print('building zip for future sessions ...')
+        print('building zip so future sessions start fast ...')
         shutil.make_archive(src.rstrip('/'), 'zip', dst)
     except Exception as ex:
         print('  (zip failed, not fatal):', ex)
     return dst
 
 
-if os.path.isdir(SV_DIR) and glob.glob(os.path.join(SV_DIR, '*', '*')):
-    SRC = SV_DIR
+def _usable(p):
+    """Readable AND listable — a shortcut can pass isdir but fail scandir."""
+    try:
+        if not os.path.isdir(p):
+            return False
+        subs = os.listdir(p)
+        for c in subs[:3]:
+            os.listdir(os.path.join(p, c))
+        return bool(subs)
+    except Exception as ex:
+        print(f'  {p}: not usable ({type(ex).__name__})')
+        return False
+
+SRC = None
+for cand in SV_CANDIDATES:
+    if _usable(cand):
+        SRC = cand
+        break
+    if os.path.exists(cand + '.zip'):
+        SRC = cand
+        break
+
+if SRC is not None:
     DIRTY = False
-elif os.path.exists(SV_DIR + '.zip'):
-    SRC = SV_DIR
-    DIRTY = False
+    print('data source:', SRC)
 elif ALLOW_DIRTY_FALLBACK and os.path.isdir(DIRTY_DIR):
     SRC = DIRTY_DIR
     DIRTY = True
@@ -162,9 +223,13 @@ elif ALLOW_DIRTY_FALLBACK and os.path.isdir(DIRTY_DIR):
           '!! wrong (bounding-box sampling). Any number below is not real.')
 else:
     raise SystemExit(
-        f'No clean data at {SV_DIR}.\n'
-        'Run streetview_collector.ipynb first — it writes polygon-verified\n'
-        'images there. (Set ALLOW_DIRTY_FALLBACK=True only for a smoke test.)')
+        'Could not read the Street View data. Tried:\n  ' +
+        '\n  '.join(SV_CANDIDATES) + '\n\n'
+        'If the folder exists in Drive but is unreadable here, it is almost\n'
+        'certainly behind a SHORTCUT (GeoGussrCheat shows a shortcut badge).\n'
+        'Colab cannot reliably read through those. Fix in Drive:\n'
+        '  right-click trainStreetView -> Organise -> Move -> My Drive\n'
+        'then re-run. Otherwise run streetview_collector.ipynb first.')
 
 DATA_DIR = _copy_local(SRC, LOCAL_SV)
 

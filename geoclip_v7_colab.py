@@ -107,6 +107,38 @@ if not _writable(FEAT_DIR):
     print('!! caching features locally at', FEAT_DIR, '(lost on disconnect)')
     _writable(FEAT_DIR)
 
+LOCAL_OUT = '/content/geoclip_v7_out'      # always writable
+os.makedirs(LOCAL_OUT, exist_ok=True)
+
+
+def save_model(obj, name='best_model.pth'):
+    """Save locally, mirror to Drive, and verify it actually landed.
+
+    A ~350MB write straight to a Drive *shortcut* can report success and
+    silently not persist - that is how the first fine-tuned model was
+    lost. Local write is the source of truth; Drive is a copy that gets
+    size-checked.
+    """
+    local = os.path.join(LOCAL_OUT, name)
+    torch.save(obj, local)
+    size = os.path.getsize(local)
+    torch.load(local, map_location='cpu')      # prove it reloads
+    print(f'saved {local}  ({size/1e6:.1f} MB, verified)')
+
+    try:
+        dst = os.path.join(OUT_DIR, name)
+        shutil.copyfile(local, dst)
+        if os.path.getsize(dst) != size:
+            raise IOError(f'Drive copy is {os.path.getsize(dst)/1e6:.1f} MB, '
+                          f'expected {size/1e6:.1f} MB')
+        print(f'  mirrored to {dst}')
+    except Exception as ex:
+        print(f'  !! could not mirror to Drive: {ex}')
+        print(f'  !! DOWNLOAD IT DIRECTLY:')
+        print(f'       from google.colab import files')
+        print(f"       files.download('{local}')")
+
+
 CLIP_MODEL    = 'ViT-B-16'      # try 'ViT-L-14' for ~+5-10 pts, ~3x slower
 CLIP_PRETRAIN = 'laion2b_s34b_b88k'
 IMG_SIZE      = 224
@@ -287,8 +319,13 @@ print(f'{NUM_CLASSES} countries | {len(all_items):,} images from '
       f'{sum(len(v) for v in by_country.values()):,} panoramas')
 print(f'fit {len(fit_items):,} | val {len(val_items):,} | test {len(test_items):,}'
       f'   ({len(_s[2]):,} test panoramas, disjoint)')
-with open(f'{OUT_DIR}/class_to_idx.json', 'w') as f:
-    json.dump(class_to_idx, f, indent=2)
+for _d in (OUT_DIR, '/content/geoclip_v7_out'):
+    try:
+        os.makedirs(_d, exist_ok=True)
+        with open(os.path.join(_d, 'class_to_idx.json'), 'w') as f:
+            json.dump(class_to_idx, f, indent=2)
+    except Exception:
+        pass
 
 # %% [markdown]
 # ## 4 · Load CLIP
@@ -444,9 +481,8 @@ with torch.no_grad():
                                               device=DEVICE)), dim=1).cpu().numpy()
 print()
 probe = report(probe_probs, 'LINEAR PROBE')
-torch.save({'mode': 'probe', 'head': best_state, 'classes': CLASSES,
-            'clip_model': CLIP_MODEL, 'clip_pretrain': CLIP_PRETRAIN},
-           f'{OUT_DIR}/best_model.pth')
+save_model({'mode': 'probe', 'head': best_state, 'classes': CLASSES,
+            'clip_model': CLIP_MODEL, 'clip_pretrain': CLIP_PRETRAIN})
 
 # %% [markdown]
 # ## 9 · Stage 2 — light fine-tune of the top ViT blocks
@@ -540,11 +576,10 @@ if DO_FINETUNE:
     ftres = report(ft_probs, 'FINE-TUNED')
 
     if ftres[2] > probe[2]:      # compare on per-location top-1
-        torch.save({'mode': 'finetune', 'visual': ft.visual.state_dict(),
+        save_model({'mode': 'finetune', 'visual': ft.visual.state_dict(),
                     'head': ft.head.state_dict(), 'classes': CLASSES,
-                    'clip_model': CLIP_MODEL, 'clip_pretrain': CLIP_PRETRAIN},
-                   f'{OUT_DIR}/best_model.pth')
-        print('fine-tune wins — saved')
+                    'clip_model': CLIP_MODEL, 'clip_pretrain': CLIP_PRETRAIN})
+        print('fine-tune wins')
         final_probs = ft_probs
     else:
         print(f'probe still better ({probe[2]:.4f} vs {ftres[2]:.4f}) — keeping it')
@@ -599,3 +634,20 @@ for i in range(NUM_CLASSES):
 print('true -> predicted (rate, count):')
 for r, a, b, n in sorted(pairs, reverse=True)[:20]:
     print(f'  {a:24s} -> {b:24s} {r:.2f}  ({n})')
+
+
+# %% [markdown]
+# ## 12 · Download the model
+#
+# Do this now — a runtime restart wipes everything, and a large write to
+# a Drive *shortcut* can silently fail to persist.
+
+# %%
+from google.colab import files
+_p = os.path.join(LOCAL_OUT, 'best_model.pth')
+print(f'{_p}  ({os.path.getsize(_p)/1e6:.1f} MB)')
+print('mode:', torch.load(_p, map_location='cpu')['mode'])
+files.download(_p)
+files.download(f'{OUT_DIR}/class_to_idx.json'
+               if os.path.exists(f'{OUT_DIR}/class_to_idx.json')
+               else f'{LOCAL_OUT}/class_to_idx.json')

@@ -7,14 +7,17 @@ it into four 90-degree heading views, runs your GeoCLIP model on each,
 and returns fused country probabilities.
 
 Why panorama IDs instead of screenshots: the image comes back clean (no
-GeoGuessr UI), at full resolution, and can be split by compass heading —
-which matches how the model was trained (multi-direction, sky cropped).
+GeoGuessr UI) and can be split by compass heading using the same
+projection maths streetview_collector.py used to build the training set,
+so what the model sees in play is identical in kind to what it trained on.
+
+v7 scores 76.7% top-1 and 96.3% top-5 per location (4 headings averaged)
+across 10,038 held-out locations.
 
 SETUP
-  1. Download from Drive GeoGussrCheat/models/geoclip_v61/ :
+  1. Download from Drive GeoGussrCheat/models/geoclip_v7/ :
        best_model.pth, class_to_idx.json
-     into ./models/geoclip_v61/ next to this file.
-     (Falls back to models/geoclip_v6/ if v6.1 isn't there yet.)
+     into ./models/geoclip_v7/ next to this file.
   2. pip install fastapi uvicorn open_clip_torch torch torchvision pillow requests
   3. python geoguessr_server.py
   4. Install geoguessr.user.js in Tampermonkey, then open GeoGuessr.
@@ -36,13 +39,14 @@ from PIL import Image
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import torch.nn as nn
 import open_clip
 import uvicorn
 
 # ── Config ──────────────────────────────────────────────────
 HERE       = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIRS = [os.path.join(HERE, 'models', 'geoclip_v61'),
-              os.path.join(HERE, 'models', 'geoclip_v6')]
+MODEL_DIRS = [os.path.join(HERE, 'models', 'geoclip_v7'),
+              os.path.join(HERE, 'models', 'geoclip_v61')]
 
 CLIP_MODEL    = 'ViT-B-16'
 CLIP_PRETRAIN = 'laion2b_s34b_b88k'
@@ -50,9 +54,9 @@ CLIP_PRETRAIN = 'laion2b_s34b_b88k'
 PANO_ZOOM   = 2      # 2 → 4x2 tiles of 512px = 2048x1024 equirectangular
 TILE_PX     = 512
 N_HEADINGS  = 4      # 0/90/180/270 degree views
-VIEW_FOV    = 90.0   # degrees, roughly GeoGuessr's default field of view
-VIEW_PITCH  = -5.0   # tilt slightly down: less sky, more road/verge detail
-VIEW_PX     = 512
+VIEW_FOV    = 90.0   # must match streetview_collector.py
+VIEW_PITCH  = -5.0
+VIEW_PX     = 320    # same size the training views were saved at
 
 # Google's tile endpoint returns 403 without a browser User-Agent.
 TILE_HEADERS = {
@@ -66,63 +70,6 @@ PORT   = 8000
 DEVICE = ('mps' if torch.backends.mps.is_available()
           else 'cuda' if torch.cuda.is_available() else 'cpu')
 
-# ── GeoTips captions — MUST match the training notebook ─────
-COUNTRY_HINTS = {
-    'Albania': 'mediterranean scrub, older camera quality, mixed road lines',
-    'Andorra': 'pyrenees mountain roads, stone buildings',
-    'Austria': 'alpine scenery, tidy central european houses, white road lines',
-    'Belgium': 'flat terrain, brick row houses, dense signage',
-    'Bosnia and Herzegovina': 'yellow road lines, balkan hills, red-roofed houses',
-    'Bulgaria': 'balkan countryside, cyrillic signs, striped kerbs',
-    'Croatia': 'adriatic coast, white stone, red tiled roofs',
-    'Cyprus': 'left-hand driving, yellow road lines, dry mediterranean hills',
-    'Czech Republic': 'central european villages, orange roofs, striped bollards',
-    'Denmark': 'flat farmland, brick houses, cycle lanes, white lines',
-    'Estonia': 'baltic forests, wooden houses, boreal conifers',
-    'Finland': 'boreal forest, lakes, wide gravel shoulders',
-    'France': 'plane trees, red-topped white bollards, kilometre stones',
-    'Germany': 'autobahn style roads, dense signage, half-timbered houses',
-    'Greece': 'olive trees, whitewashed buildings, greek signs, dry hills',
-    'Hungary': 'flat plains, pannonian villages, striped kerbstones',
-    'Iceland': 'treeless volcanic landscape, yellow road lines, gravel roads',
-    'Ireland': 'left-hand driving, green hedgerows, yellow lines, stone walls',
-    'Italy': 'terracotta roofs, cypress trees, black-banded bollards',
-    'Latvia': 'baltic pine forest, soviet era blocks, wooden farmhouses',
-    'Liechtenstein': 'alpine valley, swiss style chalets',
-    'Lithuania': 'baltic flatlands, wooden villages, conifer forest',
-    'Luxembourg': 'wooded hills, tidy prosperous villages',
-    'Malta': 'left-hand driving, limestone buildings, dry rocky terrain',
-    'Monaco': 'dense high-rise mediterranean coast, luxury cars',
-    'Montenegro': 'yellow road lines, dramatic mountains, adriatic coast',
-    'Netherlands': 'flat land, canals, brick houses, many bicycles',
-    'North Macedonia': 'balkan valleys, cyrillic signs, older imagery',
-    'Norway': 'fjords, yellow road lines, red wooden houses, tunnels',
-    'Poland': 'flat farmland, striped bollards, concrete utility poles',
-    'Portugal': 'azulejo tiles, orange roofs, cobbled roads, atlantic coast',
-    'Romania': 'carpathian hills, horse carts, orthodox churches, older camera',
-    'Serbia': 'balkan plains, cyrillic and latin signs, striped kerbs',
-    'Slovakia': 'carpathian villages, painted houses, striped bollards',
-    'Slovenia': 'alpine and mediterranean mix, tidy villages, church spires',
-    'Spain': 'dry meseta, orange bollards, white villages, olive groves',
-    'Sweden': 'boreal forest, falu red houses, wide roads with white lines',
-    'Switzerland': 'alps, chalets, immaculate roads, white lines',
-    'Turkey': 'red crescent flags, mosques, dry anatolian hills',
-    'Ukraine': 'wide plains, cyrillic signs, soviet era infrastructure',
-    'United Kingdom': 'left-hand driving, hedgerows, brick terraces, roundabouts',
-}
-CAPTION_TEMPLATES = [
-    'a street-level photo taken in {c}',
-    'a street view photo in {c}, {h}',
-    'a road in {c} with {h}',
-    'a photo of a street scene in {c}',
-]
-
-
-def country_captions(c):
-    h = COUNTRY_HINTS.get(c, 'typical local scenery')
-    return [t.format(c=c, h=h) for t in CAPTION_TEMPLATES]
-
-
 # ── Load model ──────────────────────────────────────────────
 def _find_model():
     for d in MODEL_DIRS:
@@ -131,45 +78,51 @@ def _find_model():
             return d, p
     raise SystemExit(
         'No model found. Download best_model.pth and class_to_idx.json from\n'
-        '  Drive/GeoGussrCheat/models/geoclip_v61/  (or geoclip_v6/)\n'
+        '  Drive/GeoGussrCheat/models/geoclip_v7/\n'
         f'into {MODEL_DIRS[0]}/')
 
 
 MODEL_DIR, MODEL_PATH = _find_model()
 print(f'Loading {os.path.basename(MODEL_DIR)} on {DEVICE} ...')
 
+_ckpt = torch.load(MODEL_PATH, map_location='cpu')
+if 'mode' not in _ckpt:
+    raise SystemExit(
+        f'{MODEL_PATH} is not a v7 checkpoint (no "mode" key).\n'
+        'Earlier models were trained on data whose labels were wrong and do '
+        'not work; retrain with geoclip_v7.ipynb.')
+
+MODE     = _ckpt['mode']                 # 'probe' or 'finetune'
+CLASSES  = list(_ckpt['classes'])
+CLIP_MODEL    = _ckpt.get('clip_model', 'ViT-B-16')
+CLIP_PRETRAIN = _ckpt.get('clip_pretrain', 'laion2b_s34b_b88k')
+
 clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
     CLIP_MODEL, pretrained=CLIP_PRETRAIN)
-tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
-
-_ckpt = torch.load(MODEL_PATH, map_location='cpu')
-_state = _ckpt.get('model', _ckpt)
-clip_model.load_state_dict(_state)
-clip_model = clip_model.to(DEVICE).eval()
-
-if 'classes' in _ckpt:
-    CLASSES = list(_ckpt['classes'])
-else:
-    with open(os.path.join(MODEL_DIR, 'class_to_idx.json')) as f:
-        CLASSES = sorted(json.load(f).keys())
-LOGIT_SCALE = float(_ckpt.get('logit_scale', math.log(1 / 0.07)))
-if LOGIT_SCALE < 10:                      # stored as log — exponentiate
-    LOGIT_SCALE = math.exp(LOGIT_SCALE)
-LOGIT_SCALE = min(LOGIT_SCALE, 100.0)
 
 
-@torch.no_grad()
-def build_text_anchors():
-    out = []
-    for c in CLASSES:
-        emb = clip_model.encode_text(tokenizer(country_captions(c)).to(DEVICE))
-        emb = F.normalize(emb, dim=-1).mean(0)
-        out.append(F.normalize(emb, dim=-1))
-    return torch.stack(out)
+class Head(nn.Module):
+    """Must match geoclip_v7.ipynb exactly."""
+    def __init__(self, dim, n_cls):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Dropout(0.3), nn.Linear(dim, 512), nn.GELU(),
+            nn.Dropout(0.2), nn.Linear(512, n_cls))
+
+    def forward(self, x):
+        return self.net(x)
 
 
-TEXT_ANCHORS = build_text_anchors()
-print(f'Ready — {len(CLASSES)} countries, logit scale {LOGIT_SCALE:.1f}')
+visual = clip_model.visual
+if MODE == 'finetune':
+    visual.load_state_dict(_ckpt['visual'])
+head = Head(visual.output_dim, len(CLASSES))
+head.load_state_dict(_ckpt['head'])
+
+visual = visual.to(DEVICE).eval()
+head   = head.to(DEVICE).eval()
+del clip_model
+print(f'Ready — {MODE} model, {len(CLASSES)} countries')
 
 
 # ── Panorama fetching ───────────────────────────────────────
@@ -247,14 +200,13 @@ def heading_views(pano, n=N_HEADINGS):
 # ── Inference ───────────────────────────────────────────────
 @torch.no_grad()
 def predict_views(views):
-    """Average per-view softmax (each heading = independent evidence),
-    with horizontal-flip TTA on each view."""
+    """Per-view softmax with horizontal-flip TTA. Averaging the views is
+    done by the caller — that is the 'per-location' metric v7 reports."""
     batch = torch.stack([clip_preprocess(v) for v in views]).to(DEVICE)
-    e1 = F.normalize(clip_model.encode_image(batch), dim=-1)
-    e2 = F.normalize(clip_model.encode_image(torch.flip(batch, dims=[3])), dim=-1)
+    e1 = F.normalize(visual(batch), dim=-1)
+    e2 = F.normalize(visual(torch.flip(batch, dims=[3])), dim=-1)
     emb = F.normalize((e1 + e2) / 2, dim=-1)
-    probs = F.softmax(LOGIT_SCALE * emb @ TEXT_ANCHORS.T, dim=1)
-    return probs.float().cpu().numpy()          # (n_views, n_classes)
+    return F.softmax(head(emb), dim=1).float().cpu().numpy()
 
 
 # ── API ─────────────────────────────────────────────────────

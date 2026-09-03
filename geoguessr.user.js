@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const SERVER = 'http://127.0.0.1:8000';
+  const SERVER = 'http://127.0.0.1:8010';
   const seen = new Set();       // pano ids already sent
   let sums = new Map();         // country -> summed probability
   let panoCount = 0;

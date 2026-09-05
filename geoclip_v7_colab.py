@@ -431,17 +431,59 @@ def report(probs, tag):
     return i1, i5, l1, l5
 
 # %% [markdown]
-# ## 7 · Zero-shot baseline
+# ## 7 · Zero-shot baselines — plain vs GeoTips prompts
+#
+# Two zero-shot numbers, so the GeoTips captions are *measured* rather
+# than assumed to help:
+#
+# * **plain** - "a Google Street View photo taken in France"
+# * **GeoTips** - several short captions per country covering bollards,
+#   road lines, poles, signage, architecture and vegetation, averaged.
+#   Several short captions rather than one long one because CLIP's text
+#   encoder truncates at 77 tokens.
 
 # %%
-with torch.no_grad():
-    prompts = [f'a Google Street View photo taken in {c}' for c in CLASSES]
-    A0 = F.normalize(clip_model.encode_text(
-        tokenizer(prompts).to(DEVICE)), dim=-1).float().cpu().numpy()
-_logits = Xtest @ A0.T
-_e = np.exp(_logits * 100 - (_logits * 100).max(1, keepdims=True))
-zs_probs = _e / _e.sum(1, keepdims=True)
-zs = report(zs_probs, 'ZERO-SHOT')
+# geotips_prompts.py lives in the repo; fall back to plain prompts if the
+# download fails so the notebook still runs.
+try:
+    import geotips_prompts
+except ImportError:
+    !wget -q https://raw.githubusercontent.com/karsh-s/geogussr-cheat/main/geotips_prompts.py
+    try:
+        import geotips_prompts
+    except ImportError:
+        geotips_prompts = None
+        print('!! geotips_prompts.py unavailable - plain prompts only')
+
+
+@torch.no_grad()
+def text_anchors(caption_fn):
+    """One normalised anchor per country: the mean of its captions."""
+    out = []
+    for c in CLASSES:
+        emb = clip_model.encode_text(tokenizer(caption_fn(c)).to(DEVICE))
+        emb = F.normalize(emb, dim=-1).mean(0)
+        out.append(F.normalize(emb, dim=-1))
+    return torch.stack(out).float().cpu().numpy()
+
+
+def anchor_probs(X, A, scale=100.0):
+    lg = (X @ A.T) * scale
+    e = np.exp(lg - lg.max(1, keepdims=True))
+    return e / e.sum(1, keepdims=True)
+
+
+A_plain = text_anchors(lambda c: [f'a Google Street View photo taken in {c}'])
+zs = report(anchor_probs(Xtest, A_plain), 'ZERO-SHOT plain')
+
+if geotips_prompts is not None:
+    n_caps = sum(len(geotips_prompts.country_captions(c)) for c in CLASSES)
+    print(f'\nGeoTips: {n_caps} captions across {len(CLASSES)} countries')
+    A_geo = text_anchors(geotips_prompts.country_captions)
+    zs_geo = report(anchor_probs(Xtest, A_geo), 'ZERO-SHOT GeoTips')
+    A_text = A_geo
+else:
+    zs_geo, A_text = zs, A_plain
 
 # %% [markdown]
 # ## 8 · Stage 1 — linear probe
@@ -494,6 +536,56 @@ print()
 probe = report(probe_probs, 'LINEAR PROBE')
 save_model({'mode': 'probe', 'head': best_state, 'classes': CLASSES,
             'clip_model': CLIP_MODEL, 'clip_pretrain': CLIP_PRETRAIN})
+
+# %% [markdown]
+# ## 8b · Does GeoTips text evidence add anything to the probe?
+#
+# Blend the probe's probabilities with the text-anchor probabilities and
+# pick the weight on the **val** split, then report it on test. If the
+# best weight comes out 0, the captions add nothing beyond what the head
+# already learned — which is a real answer, not a failure.
+#
+# Note this test uses the probe deliberately. Fine-tuning moves the image
+# encoder, so CLIP's original text anchors no longer sit in the same
+# space; blending them into the fine-tuned model would be comparing
+# vectors that no longer align.
+
+# %%
+with torch.no_grad():
+    probe_val = F.softmax(head(Xval_t), dim=1).cpu().numpy()
+text_val   = anchor_probs(Xval, A_text)
+text_test  = anchor_probs(Xtest, A_text)
+
+val_panos = [t[2] for t in val_items]
+
+def _loc_top1(probs, panos, y):
+    agg, truth = defaultdict(list), {}
+    for i, pid in enumerate(panos):
+        agg[pid].append(probs[i]); truth[pid] = y[i]
+    return np.mean([np.argmax(np.mean(v, axis=0)) == truth[k]
+                    for k, v in agg.items()])
+
+best_w, best_v = 0.0, -1.0
+print('weight   val per-location top-1')
+for w in (0.0, 0.05, 0.10, 0.20, 0.30, 0.50):
+    mix = (1 - w) * np.log(probe_val + 1e-9) + w * np.log(text_val + 1e-9)
+    e = np.exp(mix - mix.max(1, keepdims=True))
+    v = _loc_top1(e / e.sum(1, keepdims=True), val_panos, yval)
+    print(f'  {w:.2f}   {v:.4f}')
+    if v > best_v:
+        best_v, best_w = v, w
+
+print(f'\nbest weight on val: {best_w}')
+if best_w > 0:
+    mix = ((1 - best_w) * np.log(probe_probs + 1e-9)
+           + best_w * np.log(text_test + 1e-9))
+    e = np.exp(mix - mix.max(1, keepdims=True))
+    fused = e / e.sum(1, keepdims=True)
+    fus = report(fused, f'PROBE+GeoTips w={best_w}')
+    print(f'probe alone was  per-location top-1 {probe[2]:.4f}')
+else:
+    print('text evidence did not help - the head already captures it')
+    fus = probe
 
 # %% [markdown]
 # ## 9 · Stage 2 — light fine-tune of the top ViT blocks

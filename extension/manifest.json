@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "GeoCLIP Assistant",
+  "version": "1.0.0",
+  "description": "Predicts the country from Street View imagery using your own trained CLIP model, and shows the visual evidence behind the guess.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "GeoCLIP Assistant" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.geoguessr.com/*",
+        "https://geoguessr.com/*",
+        "https://openguessr.com/*",
+        "https://www.openguessr.com/*",
+        "https://worldguessr.com/*",
+        "https://www.worldguessr.com/*",
+        "https://freeguessr.com/*",
+        "https://www.freeguessr.com/*"
+      ],
+      "js": ["europe_paths.js", "content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

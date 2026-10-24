@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body{width:258px;margin:0;padding:14px;background:#11131c;color:#e8eaf0;
+    font:13px/1.45 ui-sans-serif,-apple-system,"Segoe UI",sans-serif}
+  h1{font-size:14px;margin:0 0 2px;font-weight:650}
+  .sub{font-size:11px;color:#79808f;margin-bottom:13px}
+  label{display:block;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+    color:#79808f;margin:11px 0 5px;font-weight:600}
+  input[type=text]{width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:7px 9px;
+    color:#e8eaf0;font-size:12px}
+  .row{display:flex;align-items:center;gap:8px;margin-top:12px}
+  .row input[type=checkbox]{accent-color:#34d399}
+  .row span{font-size:12px}
+  #status{margin-top:13px;padding:8px 10px;border-radius:8px;font-size:11.5px;
+    background:rgba(255,255,255,.05);color:#9aa1b0}
+  #status.ok{color:#34d399}
+  #status.bad{color:#f87171}
+  button{width:100%;margin-top:11px;background:#34d399;color:#07130e;border:0;
+    border-radius:8px;padding:8px;font-size:12px;font-weight:650;cursor:pointer}
+  .hint{font-size:10.5px;color:#6b7280;margin-top:9px;line-height:1.4}
+</style>
+</head>
+<body>
+  <h1>GeoCLIP Assistant</h1>
+  <div class="sub">Predicts from the imagery, shows its evidence.</div>
+
+  <label for="server">Server</label>
+  <input type="text" id="server" placeholder="http://127.0.0.1:8010">
+
+  <label for="hotkey">Hotkey</label>
+  <input type="text" id="hotkey" maxlength="1" placeholder="g">
+
+  <div class="row">
+    <input type="checkbox" id="autoShow">
+    <span>Analyse automatically on each new panorama</span>
+  </div>
+
+  <div id="status">checking…</div>
+  <button id="save">Save</button>
+  <div class="hint">Press the hotkey in-game to show or hide the panel.
+    Leave auto-analyse off to only run the model when you ask.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

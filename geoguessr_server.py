@@ -113,16 +113,49 @@ class Head(nn.Module):
         return self.net(x)
 
 
-visual = clip_model.visual
+tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
+
 if MODE == 'finetune':
-    visual.load_state_dict(_ckpt['visual'])
+    clip_model.visual.load_state_dict(_ckpt['visual'])
+visual = clip_model.visual
 head = Head(visual.output_dim, len(CLASSES))
 head.load_state_dict(_ckpt['head'])
 
+clip_model = clip_model.to(DEVICE).eval()
 visual = visual.to(DEVICE).eval()
 head   = head.to(DEVICE).eval()
-del clip_model
-print(f'Ready — {MODE} model, {len(CLASSES)} countries')
+
+# ── GeoTips cue bank ────────────────────────────────────────
+# In probe mode the image encoder is untouched, so CLIP's image/text
+# alignment still holds and each cue can be scored against the actual
+# photo. Fine-tuning moves the image encoder away from that text space,
+# so there we fall back to listing the country's typical cues and say so
+# rather than reporting a similarity that no longer means anything.
+try:
+    import geotips_prompts
+except ImportError:
+    geotips_prompts = None
+
+CUE_MODE = ('scored' if (MODE == 'probe' and geotips_prompts) else
+            'typical' if geotips_prompts else 'none')
+
+CUE_BANK = {}
+if geotips_prompts:
+    with torch.no_grad():
+        for _c in CLASSES:
+            _cues = geotips_prompts.GEOTIPS.get(_c, {})
+            if not _cues:
+                continue
+            _labels = list(_cues.keys())
+            _texts  = list(_cues.values())
+            _emb = None
+            if CUE_MODE == 'scored':
+                _caps = [geotips_prompts.TEMPLATE.format(c=_c, cue=t) for t in _texts]
+                _emb = F.normalize(
+                    clip_model.encode_text(tokenizer(_caps).to(DEVICE)), dim=-1)
+            CUE_BANK[_c] = (_labels, _texts, _emb)
+
+print(f'Ready — {MODE} model, {len(CLASSES)} countries, cues: {CUE_MODE}')
 
 
 # ── Panorama fetching ───────────────────────────────────────
@@ -200,13 +233,34 @@ def heading_views(pano, n=N_HEADINGS):
 # ── Inference ───────────────────────────────────────────────
 @torch.no_grad()
 def predict_views(views):
-    """Per-view softmax with horizontal-flip TTA. Averaging the views is
-    done by the caller — that is the 'per-location' metric v7 reports."""
+    """Per-view softmax with horizontal-flip TTA, plus the mean image
+    embedding (used for cue scoring). Averaging across views is done by
+    the caller — that is the 'per-location' metric v7 reports."""
     batch = torch.stack([clip_preprocess(v) for v in views]).to(DEVICE)
     e1 = F.normalize(visual(batch), dim=-1)
     e2 = F.normalize(visual(torch.flip(batch, dims=[3])), dim=-1)
     emb = F.normalize((e1 + e2) / 2, dim=-1)
-    return F.softmax(head(emb), dim=1).float().cpu().numpy()
+    probs = F.softmax(head(emb), dim=1).float().cpu().numpy()
+    return probs, emb
+
+
+@torch.no_grad()
+def explain(country, emb, top_k=3):
+    """Which of the country's GeoTips cues this image actually supports."""
+    entry = CUE_BANK.get(country)
+    if entry is None:
+        return []
+    labels, texts, cue_emb = entry
+    if CUE_MODE != 'scored' or cue_emb is None:
+        return [{'cue': l, 'text': t, 'score': None}
+                for l, t in list(zip(labels, texts))[:top_k]]
+    sims = (F.normalize(emb.mean(0, keepdim=True), dim=-1)
+            @ cue_emb.T)[0].float().cpu().numpy()
+    lo, hi = float(sims.min()), float(sims.max())
+    rng = max(hi - lo, 1e-6)
+    order = np.argsort(sims)[::-1][:top_k]
+    return [{'cue': labels[i], 'text': texts[i],
+             'score': round(float((sims[i] - lo) / rng), 3)} for i in order]
 
 
 # ── API ─────────────────────────────────────────────────────
@@ -224,7 +278,8 @@ class PredictRequest(BaseModel):
 @app.get('/health')
 def health():
     return {'ok': True, 'model': os.path.basename(MODEL_DIR),
-            'countries': len(CLASSES), 'device': DEVICE}
+            'mode': MODE, 'countries': len(CLASSES), 'device': DEVICE,
+            'cue_mode': CUE_MODE}
 
 
 @app.post('/predict')
@@ -238,13 +293,15 @@ def predict(req: PredictRequest):
         return {'error': f'could not fetch panorama {pid}'}
 
     views = heading_views(pano)
-    per_view = predict_views(views)
+    per_view, emb = predict_views(views)
     mean = per_view.mean(axis=0)
     order = np.argsort(mean)[::-1][:5]
 
     result = {
         'pano_id': pid,
         'top': [[CLASSES[i], round(float(mean[i]), 4)] for i in order],
+        'cues': explain(CLASSES[int(order[0])], emb),
+        'cue_mode': CUE_MODE,
         'per_heading': [
             {'heading': i * (360 // N_HEADINGS),
              'country': CLASSES[int(p.argmax())],

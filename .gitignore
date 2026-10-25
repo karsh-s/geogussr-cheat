@@ -3,3 +3,9 @@ __pycache__/
 *.pth
 features_v7/
 models/
+extension/model/*.onnx
+extension/model/*.onnx.data
+trainEurope/
+testEurope/
+trainCountries/
+testCountries/

@@ -13,6 +13,63 @@
   'use strict';
 
   const CFG = { server: '', hotkey: 'g', autoShow: false };
+
+  // ── Solo-play guard ──────────────────────────────────────
+  // The assistant is for solo play. In any mode where a live opponent is
+  // involved it disables itself: no predictions, no panel, nothing sent
+  // to the server. Matching is on the URL, which is reliable across all
+  // four supported sites, and is re-checked on every SPA navigation.
+  const MULTIPLAYER_RE = [
+    /\/duels?(\/|$)/i,            // GeoGuessr Duels / Team Duels
+    /\/team-duels?(\/|$)/i,
+    /\/battle-royale(\/|$)/i,
+    /\/br(\/|$)/i,
+    /\/live-challenge(\/|$)/i,
+    /\/party(\/|$)/i,
+    /\/lobby(\/|$)/i,
+    /\/multiplayer(\/|$)/i,
+    /\/competitive(\/|$)/i,
+    /\/ranked(\/|$)/i,
+    /\/matchmaking(\/|$)/i,
+    /\/versus(\/|$)/i,
+    /\/1v1(\/|$)/i,
+    /\/online(\/|$)/i,            // WorldGuessr / OpenGuessr online play
+    /\/room(\/|$)/i,
+  ];
+
+  let blocked = false;
+
+  function multiplayerHere() {
+    const u = location.pathname + location.search + location.hash;
+    return MULTIPLAYER_RE.some(re => re.test(u));
+  }
+
+  function refreshMode() {
+    const was = blocked;
+    blocked = multiplayerHere();
+    if (blocked && !was) {
+      // drop anything already accumulated so nothing lingers on screen
+      sums = new Map(); panoCount = 0; lastCues = [];
+      if (ui) ui.root.classList.add('gc-hidden');
+      visible = false;
+    }
+    if (ui && was !== blocked) render();
+  }
+
+  function watchNavigation() {
+    for (const m of ['pushState', 'replaceState']) {
+      const orig = history[m];
+      history[m] = function (...a) {
+        const r = orig.apply(this, a);
+        setTimeout(refreshMode, 0);
+        return r;
+      };
+    }
+    addEventListener('popstate', refreshMode);
+    addEventListener('hashchange', refreshMode);
+    setInterval(refreshMode, 2000);   // belt and braces for client routers
+    refreshMode();
+  }
   const seen = new Set();
   let sums = new Map();        // country -> summed probability
   let panoCount = 0;
@@ -158,6 +215,19 @@
   // ── Rendering ────────────────────────────────────────────
   function render() {
     if (!ui) return;
+    if (blocked) {
+      ui.country.textContent = 'Multiplayer';
+      ui.conf.textContent = '';
+      ui.dot.style.background = '#f87171';
+      ui.list.innerHTML = '<div class="gc-lbl">Disabled</div>'
+        + '<div class="gc-cue"><span>This is a game against other players, '
+        + 'so the assistant is switched off. It works in solo and practice '
+        + 'rounds.</span></div>';
+      ui.cues.innerHTML = '';
+      drawMap({});
+      ui.status.textContent = 'solo play only';
+      return;
+    }
     if (!panoCount) {
       ui.country.textContent = 'No panorama yet';
       ui.conf.textContent = '';
@@ -222,6 +292,7 @@
   }
 
   function analyse(panoId) {
+    if (blocked) { if (ui) ui.status.textContent = 'disabled in multiplayer'; return; }
     if (busy || !panoId) return;
     busy = true;
     if (ui) ui.status.textContent = 'analysing…';
@@ -248,6 +319,7 @@
     if (!id || seen.has(id)) { latestPano = id || latestPano; return; }
     seen.add(id);
     latestPano = id;
+    if (blocked) return;
     if (CFG.autoShow) { show(true); analyse(id); }
   }
 
@@ -285,7 +357,9 @@
     if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
     if (e.key.toLowerCase() !== (CFG.hotkey || 'g').toLowerCase()) return;
     e.preventDefault();
+    refreshMode();
     show(!visible);
+    if (visible && blocked) { render(); return; }
     if (visible) {
       if (!ui.status.textContent || /offline|connecting/.test(ui.status.textContent)) checkHealth();
       if (latestPano && !seen.has(latestPano + ':done')) {
@@ -298,4 +372,5 @@
   }, true);
 
   watch();
+  watchNavigation();
 })();

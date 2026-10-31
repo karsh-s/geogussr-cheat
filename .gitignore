@@ -9,3 +9,7 @@ trainEurope/
 testEurope/
 trainCountries/
 testCountries/
+
+# Web Store build artifacts
+extension/*.zip
+extension/store_screenshot_*.png
